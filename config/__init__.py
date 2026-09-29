@@ -1,0 +1,1 @@
+"""WHIS configuration package."""

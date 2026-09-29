@@ -44,8 +44,11 @@ Copy `.env.example` to `.env` and fill in the values.
 
 ## Project Structure
 
-- `app/`: Core application logic
-- `config/`: Configuration settings and logging
-- `tests/`: Unit tests
-- `scripts/`: Helper scripts
+- `app/`: Application packages for AI, agents, models, tools, memory, media, automation, and UI
+- `config/`: Settings, logging, model, permission, and automation configuration
+- `models/`: Local model slots grouped by capability
+- `runtime/`: Native inference runtime slots and binaries
+- `data/`: Persistent memory, conversations, embeddings, cache, user, and task data
+- `scripts/`: Setup, model, runtime, build, and startup helpers
+- `tests/`: Package-level unit test modules
 - `logs/`: Application logs
