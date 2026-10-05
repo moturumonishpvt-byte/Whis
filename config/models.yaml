@@ -1,2 +1,128 @@
-# Model catalog configuration.
-models: {}
+# WHIS Model Registry Configuration
+# Authoritative definitions for all local models managed by WHIS.
+# Target Hardware: Intel Core i3-1005G1, 16 GB RAM, Intel UHD Graphics (CPU inference).
+# All model and projector paths are relative to the WHIS project root.
+
+models:
+  qwen3.5-4b:
+    id: qwen3.5-4b
+    display_name: Qwen3.5 4B
+    type: llm
+    model_path: models/llama.cpp/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf
+    mmproj_path: null
+    capabilities:
+      - chat
+      - text_generation
+    role: main_brain
+    status: verified
+    size_gb: 2.71
+    priority: 1
+    default_context: 4096
+    runtime: llama.cpp
+    enabled: true
+
+  lfm2.5-thinking-1.2b:
+    id: lfm2.5-thinking-1.2b
+    display_name: LFM2.5 1.2B Thinking
+    type: thinking
+    model_path: models/llama.cpp/lfm2.5-thinking-1.2b/LFM2.5-1.2B-Thinking-Q4_K_M.gguf
+    mmproj_path: null
+    capabilities:
+      - text_generation
+      - reasoning
+    role: fast_reasoning
+    status: verified
+    size_gb: 0.73
+    priority: 2
+    default_context: 4096
+    runtime: llama.cpp
+    enabled: true
+
+  qwen3-vl-4b:
+    id: qwen3-vl-4b
+    display_name: Qwen3-VL 4B Instruct
+    type: vlm
+    model_path: models/llama.cpp/qwen3-vl-4b/Qwen3VL-4B-Instruct-Q4_K_M.gguf
+    mmproj_path: models/llama.cpp/qwen3-vl-4b/mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf
+    capabilities:
+      - text_generation
+      - vision
+      - video
+    role: vision_understanding
+    status: verified
+    size_gb: 2.95
+    priority: 3
+    default_context: 2048
+    runtime: llama.cpp
+    enabled: true
+
+  qwen3-coder-30b:
+    id: qwen3-coder-30b
+    display_name: Qwen3-Coder 30B A3B
+    type: llm
+    model_path: models/llama.cpp/qwen3-coder-30b/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
+    mmproj_path: null
+    capabilities:
+      - chat
+      - text_generation
+      - code
+    role: coding_specialist
+    status: verified
+    size_gb: 18.56
+    priority: 4
+    default_context: 4096
+    runtime: llama.cpp
+    enabled: true
+
+  qwen3-embedding-4b:
+    id: qwen3-embedding-4b
+    display_name: Qwen3-Embedding 4B
+    type: embedding
+    model_path: models/llama.cpp/qwen3-embedding-4b/Qwen3-Embedding-4B-Q4_K_M.gguf
+    mmproj_path: null
+    capabilities:
+      - embedding
+    role: memory_embeddings
+    status: verified
+    size_gb: 2.50
+    priority: 5
+    default_context: 512
+    runtime: llama.cpp
+    enabled: true
+
+  glm-ocr:
+    id: glm-ocr
+    display_name: GLM-OCR
+    type: ocr
+    model_path: models/llama.cpp/glm-ocr/GLM-OCR-Q8_0.gguf
+    mmproj_path: models/llama.cpp/glm-ocr/mmproj-GLM-OCR-Q8_0.gguf
+    capabilities:
+      - text_generation
+      - vision
+      - ocr
+    role: primary_ocr
+    status: verified
+    size_gb: 1.43
+    priority: 6
+    default_context: 2048
+    runtime: llama.cpp
+    enabled: true
+
+  deepseek-ocr:
+    id: deepseek-ocr
+    display_name: DeepSeek-OCR
+    type: ocr
+    model_path: models/llama.cpp/deepseek-ocr/DeepSeek-OCR-Q8_0.gguf
+    mmproj_path: models/llama.cpp/deepseek-ocr/mmproj-DeepSeek-OCR-Q8_0.gguf
+    capabilities:
+      - text_generation
+      - vision
+      - ocr
+    role: ocr_fallback
+    status: experimental
+    description: "Experimental OCR fallback. Grounding works, plain OCR output has not been verified."
+    size_gb: 3.57
+    priority: 7
+    default_context: 2048
+    runtime: llama.cpp
+    enabled: true
