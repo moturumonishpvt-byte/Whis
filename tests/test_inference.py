@@ -78,6 +78,13 @@ class FakeRuntimeAdapter(RuntimeAdapter):
             generated_tokens_estimate=8,
         )
 
+    def embed(
+        self,
+        model: ModelDefinition,
+        text: str,
+    ) -> list[float]:
+        return [0.1, 0.2, 0.3, 0.4]
+
 
 class TestInferenceEngine(unittest.TestCase):
     """Test suite for InferenceEngine functionality."""

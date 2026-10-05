@@ -10,10 +10,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import json
 from pathlib import Path
 import subprocess
 import time
 from typing import Any, Dict, List, Optional, Union
+import urllib.request
 
 from app.ai.model_manager import PROJECT_ROOT, ModelDefinition
 from app.core.exceptions import WHISError
@@ -127,10 +129,12 @@ class RuntimeConfig:
     """Configuration options for a runtime adapter."""
 
     executable: str = "llama-cli"
+    embedding_executable: str = "llama-server"
+    server_port: int = 8089
     device_policy: DevicePolicy = DevicePolicy.CPU_ONLY
     ngl: int = 0
     threads: Optional[int] = None
-    startup_timeout: float = 5.0
+    startup_timeout: float = 10.0
     stop_timeout: float = 5.0
 
     def __post_init__(self) -> None:
@@ -179,6 +183,14 @@ class RuntimeAdapter(ABC):
         This runs a separate short-lived process distinct from the managed
         lifecycle sentinel process. It does not affect the runtime state.
         """
+
+    @abstractmethod
+    def embed(
+        self,
+        model: ModelDefinition,
+        text: str,
+    ) -> List[float]:
+        """Generate an embedding vector for the text using the specified embedding model."""
 
 
 class LlamaCppRuntime(RuntimeAdapter):
@@ -267,6 +279,24 @@ class LlamaCppRuntime(RuntimeAdapter):
         and device offloading policies are strictly respected. Never returns a shell string.
         """
         resolved_model_path = self.resolve_model_path(model)
+
+        if model.type == "embedding":
+            cmd = [
+                self.config.embedding_executable,
+                "-m",
+                str(resolved_model_path),
+                "--embedding",
+                "--port",
+                str(self.config.server_port),
+            ]
+            if model.default_context:
+                cmd.extend(["-c", str(model.default_context)])
+            ngl = self.resolve_ngl()
+            cmd.extend(["-ngl", str(ngl)])
+            if self.config.threads is not None and self.config.threads > 0:
+                cmd.extend(["-t", str(self.config.threads)])
+            self._last_command = list(cmd)
+            return cmd
 
         cmd: List[str] = [
             self.config.executable,
@@ -407,6 +437,23 @@ class LlamaCppRuntime(RuntimeAdapter):
                 returncode=poll_result,
                 stderr=stderr_out or None,
             )
+
+        if model.type == "embedding":
+            # Wait for embedding server to become ready
+            ready = self._wait_for_server_ready(timeout=self.config.startup_timeout)
+            if not ready:
+                poll = self._process.poll()
+                err = ""
+                try:
+                    if self._process.stderr:
+                        err = self._process.stderr.read()
+                except Exception:
+                    pass
+                self.stop()
+                raise RuntimeStartError(
+                    f"Embedding server failed to become ready on port {self.config.server_port}. Returncode: {poll}. Stderr: {err}",
+                    model_id=model.id,
+                )
 
         self._state = RuntimeState.RUNNING
         logger.info("Successfully started runtime for model '%s'.", model.id)
@@ -602,3 +649,56 @@ class LlamaCppRuntime(RuntimeAdapter):
             generated_tokens_estimate=generated_tokens_est,
             raw_stderr=stderr if stderr.strip() else None,
         )
+
+    def _wait_for_server_ready(self, timeout: float = 10.0) -> bool:
+        """Poll the embedding server health endpoint until ready or timeout."""
+        start_time = time.monotonic()
+        health_url = f"http://127.0.0.1:{self.config.server_port}/health"
+        while time.monotonic() - start_time < timeout:
+            if self._process and self._process.poll() is not None:
+                return False
+            try:
+                req = urllib.request.Request(health_url, method="GET")
+                with urllib.request.urlopen(req, timeout=0.5) as resp:
+                    if resp.status == 200:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return False
+
+    def embed(
+        self,
+        model: ModelDefinition,
+        text: str,
+        timeout: float = 30.0,
+    ) -> List[float]:
+        """Request an embedding vector from the running llama-server embedding process."""
+        if not self.is_running():
+            raise RuntimeProcessError(
+                "Runtime is not running. Model must be loaded before calling embed().",
+                model_id=model.id,
+            )
+        if self._current_model is None or self._current_model.id != model.id:
+            active_id = self._current_model.id if self._current_model else "none"
+            raise RuntimeProcessError(
+                f"Active model '{active_id}' does not match requested model '{model.id}'.",
+                model_id=model.id,
+            )
+
+        url = f"http://127.0.0.1:{self.config.server_port}/v1/embeddings"
+        payload = json.dumps({"input": text}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["data"][0]["embedding"]
+        except Exception as exc:
+            raise RuntimeInferenceError(
+                f"Failed to generate embedding for model '{model.id}': {exc}",
+                model_id=model.id,
+            ) from exc
