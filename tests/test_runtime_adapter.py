@@ -13,10 +13,13 @@ from unittest.mock import MagicMock, patch
 from app.ai.model_manager import ModelDefinition, ModelRegistry, PROJECT_ROOT
 from app.ai.runtime import (
     DevicePolicy,
+    GenerationConfig,
+    InferenceResult,
     LlamaCppRuntime,
     RuntimeAdapter,
     RuntimeAdapterError,
     RuntimeConfig,
+    RuntimeInferenceError,
     RuntimeProcessError,
     RuntimeStartError,
     RuntimeState,
@@ -291,6 +294,65 @@ class TestRuntimeAdapter(unittest.TestCase):
         t_idx = cmd.index("-t")
         self.assertEqual(cmd[t_idx + 1], "4")
 
+    def test_generate_command_construction(self) -> None:
+        """Runtime constructs correct arguments for one-shot inference."""
+        cfg = GenerationConfig(max_new_tokens=64, temperature=0.7, stop_sequences=["User:"])
+        cmd = self.runtime._build_generate_command(self.text_model, "Test prompt", cfg)
+
+        self.assertIn("-m", cmd)
+        self.assertIn("-p", cmd)
+        p_idx = cmd.index("-p")
+        self.assertEqual(cmd[p_idx + 1], "Test prompt")
+        self.assertIn("-n", cmd)
+        n_idx = cmd.index("-n")
+        self.assertEqual(cmd[n_idx + 1], "64")
+        self.assertIn("--temp", cmd)
+        temp_idx = cmd.index("--temp")
+        self.assertEqual(cmd[temp_idx + 1], "0.7")
+        self.assertIn("--single-turn", cmd)
+        self.assertIn("--no-display-prompt", cmd)
+        self.assertIn("-r", cmd)
+        r_idx = cmd.index("-r")
+        self.assertEqual(cmd[r_idx + 1], "User:")
+
+    def test_clean_output(self) -> None:
+        """_clean_output strips ASCII banner, prompt echo, and timing stats."""
+        raw = (
+            "\n\nLoading model... \n\n▄▄ ▄▄\n██ ██\n\n"
+            "> Hello world\n\n"
+            "This is the actual model answer.\n\n"
+            "[ Prompt: 7.4 t/s | Generation: 5.1 t/s ]\n\n"
+            "Exiting...\n"
+        )
+        cleaned = LlamaCppRuntime._clean_output(raw)
+        self.assertEqual(cleaned, "This is the actual model answer.")
+
+    @patch("subprocess.run")
+    def test_generate_success_mocked(self, mock_run: MagicMock) -> None:
+        """Test successful one-shot inference execution with mocked subprocess."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="\n> What is 1+1?\n2\n[ Prompt: 5 t/s ]\nExiting...",
+            stderr="",
+        )
+
+        result = self.runtime.generate(self.text_model, "What is 1+1?")
+        self.assertTrue(result.success)
+        self.assertEqual(result.text, "2")
+        self.assertEqual(result.model_id, self.text_model.id)
+        self.assertGreater(result.prompt_tokens_estimate, 0)
+        self.assertGreaterEqual(result.generated_tokens_estimate, 0)
+
+    @patch("subprocess.run")
+    def test_generate_timeout_mocked(self, mock_run: MagicMock) -> None:
+        """Test timeout during one-shot inference raises RuntimeInferenceError."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["llama-cli"], timeout=5.0)
+
+        with self.assertRaises(RuntimeInferenceError) as ctx:
+            self.runtime.generate(self.text_model, "Test", config=GenerationConfig(timeout=5.0))
+        self.assertIn("timed out", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+

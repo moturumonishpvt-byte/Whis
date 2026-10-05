@@ -21,6 +21,7 @@ from app.core.exceptions import WHISError
 logger = logging.getLogger(__name__)
 
 
+
 class RuntimeState(str, Enum):
     """Lifecycle states of the runtime adapter."""
 
@@ -85,6 +86,42 @@ class RuntimeProcessError(RuntimeAdapterError):
     """Raised when an operation is invalid for current process state."""
 
 
+class RuntimeInferenceError(RuntimeAdapterError):
+    """Raised when an inference generation attempt fails."""
+
+
+@dataclass(frozen=True)
+class GenerationConfig:
+    """Parameters controlling one inference generation call."""
+
+    max_new_tokens: int = 512
+    temperature: float = 0.8
+    timeout: float = 120.0  # seconds before generation is killed
+    stop_sequences: Optional[List[str]] = None
+
+    def __post_init__(self) -> None:
+        if self.max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be >= 1")
+        if not (0.0 <= self.temperature <= 2.0):
+            raise ValueError("temperature must be between 0.0 and 2.0")
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+
+@dataclass(frozen=True)
+class InferenceResult:
+    """Structured result from a single inference generation call."""
+
+    text: str
+    model_id: str
+    success: bool
+    elapsed_seconds: float
+    prompt_tokens_estimate: int = 0
+    generated_tokens_estimate: int = 0
+    error: Optional[str] = None
+    raw_stderr: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Configuration options for a runtime adapter."""
@@ -129,6 +166,19 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def stop(self, timeout: Optional[float] = None) -> None:
         """Stop and clean up the model subprocess."""
+
+    @abstractmethod
+    def generate(
+        self,
+        model: ModelDefinition,
+        prompt: str,
+        config: Optional[GenerationConfig] = None,
+    ) -> InferenceResult:
+        """Run a one-shot inference call for the given prompt and model.
+
+        This runs a separate short-lived process distinct from the managed
+        lifecycle sentinel process. It does not affect the runtime state.
+        """
 
 
 class LlamaCppRuntime(RuntimeAdapter):
@@ -397,3 +447,158 @@ class LlamaCppRuntime(RuntimeAdapter):
             self._current_model = None
             self._process = None
             logger.info("Runtime process stopped successfully.")
+
+    def _build_generate_command(
+        self,
+        model: ModelDefinition,
+        prompt: str,
+        config: GenerationConfig,
+    ) -> List[str]:
+        """Build argument list for a one-shot inference call."""
+        resolved_model_path = self.resolve_model_path(model)
+
+        cmd: List[str] = [
+            self.config.executable,
+            "-m", str(resolved_model_path),
+            "-p", prompt,
+            "-n", str(config.max_new_tokens),
+            "--temp", str(config.temperature),
+            "-c", str(model.default_context),
+            "-ngl", str(self.resolve_ngl()),
+            "--no-display-prompt",  # suppress echoing the prompt to stdout
+            "--log-disable",        # suppress llama.cpp INFO log lines
+            "--simple-io",          # clean stdout for subprocess capture
+            "--single-turn",        # execute single turn and exit immediately
+        ]
+
+        if model.has_projector and model.mmproj_path:
+            resolved_mmproj = self.resolve_mmproj_path(model)
+            if resolved_mmproj:
+                cmd.extend(["--mmproj", str(resolved_mmproj)])
+
+        if self.config.threads is not None and self.config.threads > 0:
+            cmd.extend(["-t", str(self.config.threads)])
+
+        if config.stop_sequences:
+            for seq in config.stop_sequences:
+                cmd.extend(["-r", seq])
+
+        return cmd
+
+    @staticmethod
+    def _clean_output(raw_stdout: str) -> str:
+        """Strip llama-cli ASCII banner, prompt echo, and trailing stats from stdout."""
+        text = raw_stdout
+        # Find start of conversation turn if banner was printed
+        if "\n> " in text:
+            text = text.split("\n> ", 1)[1]
+            # Skip the prompt line itself
+            if "\n" in text:
+                text = text.split("\n", 1)[1]
+            else:
+                text = ""
+
+        # Filter out trailing timing/status lines
+        lines: List[str] = []
+        for line in text.splitlines():
+            trimmed = line.strip()
+            if trimmed.startswith("[ Prompt:") or trimmed == "Exiting...":
+                continue
+            lines.append(line)
+
+        cleaned = "\n".join(lines).strip()
+        if cleaned.startswith("Assistant:"):
+            cleaned = cleaned[len("Assistant:") :].strip()
+        return cleaned
+
+    def generate(
+        self,
+        model: ModelDefinition,
+        prompt: str,
+        config: Optional[GenerationConfig] = None,
+    ) -> InferenceResult:
+        """Run a one-shot inference call through llama-cli for the given prompt.
+
+        Spawns a separate short-lived process that does not affect the managed
+        lifecycle sentinel process. Process ownership and shutdown remain with
+        start()/stop(). The current runtime state is not mutated.
+
+        Args:
+            model: ModelDefinition to run inference against.
+            prompt: Fully constructed prompt string.
+            config: GenerationConfig controlling generation parameters.
+
+        Returns:
+            InferenceResult with generated text, timing, and success status.
+
+        Raises:
+            RuntimeInferenceError: If the process fails to launch or returns an error.
+        """
+        cfg = config or GenerationConfig()
+        cmd = self._build_generate_command(model, prompt, cfg)
+        logger.debug("Generating with llama.cpp command: %s", cmd)
+
+        t_start = time.monotonic()
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=cfg.timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            elapsed = time.monotonic() - t_start
+            raise RuntimeInferenceError(
+                f"Inference timed out after {cfg.timeout}s for model '{model.id}'.",
+                model_id=model.id,
+            ) from exc
+        except FileNotFoundError as exc:
+            elapsed = time.monotonic() - t_start
+            raise RuntimeInferenceError(
+                f"Executable '{self.config.executable}' not found. Cannot run inference.",
+                model_id=model.id,
+                executable=self.config.executable,
+            ) from exc
+        except Exception as exc:
+            elapsed = time.monotonic() - t_start
+            raise RuntimeInferenceError(
+                f"Inference failed for model '{model.id}': {exc}",
+                model_id=model.id,
+            ) from exc
+
+        elapsed = time.monotonic() - t_start
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+
+        # llama-cli returns 0 on success; non-zero indicates an error
+        if proc.returncode != 0 and not stdout.strip():
+            raise RuntimeInferenceError(
+                f"Inference process exited with code {proc.returncode} for model '{model.id}'.",
+                model_id=model.id,
+                returncode=proc.returncode,
+                stderr=stderr,
+            )
+
+        # Clean llama-cli banner and timing lines if present
+        generated_text = self._clean_output(stdout)
+
+        # Rough token estimates (chars / 4)
+        prompt_tokens_est = max(1, int(len(prompt) / 4))
+        generated_tokens_est = max(0, int(len(generated_text) / 4))
+
+        logger.info(
+            "Inference complete for model '%s': %.2fs, ~%d generated tokens.",
+            model.id,
+            elapsed,
+            generated_tokens_est,
+        )
+
+        return InferenceResult(
+            text=generated_text,
+            model_id=model.id,
+            success=True,
+            elapsed_seconds=elapsed,
+            prompt_tokens_estimate=prompt_tokens_est,
+            generated_tokens_estimate=generated_tokens_est,
+            raw_stderr=stderr if stderr.strip() else None,
+        )
