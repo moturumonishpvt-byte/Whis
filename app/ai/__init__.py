@@ -1,5 +1,13 @@
 """AI runtime and orchestration components."""
 
+from app.ai.loader import (
+    LoadedModelInfo,
+    ModelAlreadyLoadedError,
+    ModelDisabledError,
+    ModelLoadError,
+    ModelLoader,
+    ModelLoaderError,
+)
 from app.ai.model_manager import (
     ModelConfigError,
     ModelDefinition,
@@ -22,8 +30,14 @@ from app.ai.runtime import (
 __all__ = [
     "DevicePolicy",
     "LlamaCppRuntime",
+    "LoadedModelInfo",
+    "ModelAlreadyLoadedError",
     "ModelConfigError",
     "ModelDefinition",
+    "ModelDisabledError",
+    "ModelLoadError",
+    "ModelLoader",
+    "ModelLoaderError",
     "ModelNotFoundError",
     "ModelRegistry",
     "ModelRegistryError",
@@ -35,4 +49,5 @@ __all__ = [
     "RuntimeStartError",
     "RuntimeState",
 ]
+
 
