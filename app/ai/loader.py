@@ -24,6 +24,7 @@ from app.ai.model_manager import (
     ModelNotFoundError,
     ModelRegistry,
 )
+from app.ai.ram_manager import InsufficientMemoryError, MemoryDecision, RAMManager
 from app.ai.runtime import (
     DevicePolicy,
     LlamaCppRuntime,
@@ -94,10 +95,12 @@ class ModelLoader:
         registry: Optional[ModelRegistry] = None,
         runtime: Optional[RuntimeAdapter] = None,
         lifecycle: Optional[ModelLifecycle] = None,
+        ram_manager: Optional[RAMManager] = None,
     ) -> None:
         self.registry: ModelRegistry = registry if registry is not None else ModelRegistry()
         self.runtime: RuntimeAdapter = runtime if runtime is not None else LlamaCppRuntime()
         self.lifecycle: ModelLifecycle = lifecycle if lifecycle is not None else ModelLifecycle()
+        self.ram_manager: Optional[RAMManager] = ram_manager
         self._loaded_model_id: Optional[str] = None
         self._loaded_model_def: Optional[ModelDefinition] = None
         self._loaded_at: Optional[float] = None
@@ -162,14 +165,23 @@ class ModelLoader:
         """Return high-level ModelRuntimeStatus from the lifecycle state machine."""
         return self.lifecycle.get_status(self.runtime)
 
-    def load(self, model_id: str) -> LoadedModelInfo:
+    def load(
+        self,
+        model_id: str,
+        check_ram: bool = True,
+        allow_warning: bool = True,
+        context_tokens: Optional[int] = None,
+    ) -> LoadedModelInfo:
         """Load a registered model through the RuntimeAdapter.
 
         Enforces single-model concurrency. Validates model registration, enabled flag,
-        and existence of required weight and projector files before invoking runtime.
+        file prerequisites, and physical RAM safety before invoking runtime.
 
         Args:
             model_id: Identifier of model registered in ModelRegistry.
+            check_ram: Whether to evaluate memory safety before loading.
+            allow_warning: If False, memory evaluation WARNING is rejected as unsafe.
+            context_tokens: Optional custom context size for RAM estimation.
 
         Returns:
             LoadedModelInfo describing the active model and runtime.
@@ -179,6 +191,7 @@ class ModelLoader:
             ModelNotFoundError: If model_id is not registered.
             ModelDisabledError: If the model is marked enabled=False.
             ModelLoadError: If required files are missing or runtime startup fails.
+            InsufficientMemoryError: If RAM evaluation reports UNSAFE (or WARNING with allow_warning=False).
         """
         # 1. Check single active model rule
         if self.is_loaded():
@@ -218,7 +231,23 @@ class ModelLoader:
                     model_id=model_id,
                 )
 
-        # 5. Transition lifecycle: UNLOADED -> LOADING
+        # 5. Evaluate RAM safety if RAMManager configured
+        if check_ram and self.ram_manager is not None:
+            safety = self.ram_manager.evaluate_safety(model_id, context_tokens=context_tokens)
+            if safety.decision == MemoryDecision.UNSAFE:
+                raise InsufficientMemoryError(
+                    f"Cannot load model '{model_id}': memory safety evaluation is UNSAFE. {safety.reason}",
+                    model_id=model_id,
+                    evaluation=safety,
+                )
+            if safety.decision == MemoryDecision.WARNING and not allow_warning:
+                raise InsufficientMemoryError(
+                    f"Cannot load model '{model_id}': memory safety evaluation is WARNING and allow_warning=False. {safety.reason}",
+                    model_id=model_id,
+                    evaluation=safety,
+                )
+
+        # 6. Transition lifecycle: UNLOADED -> LOADING
         self.lifecycle.begin_loading(model_id)
 
         # 6. Delegate startup to RuntimeAdapter
