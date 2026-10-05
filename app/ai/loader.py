@@ -12,6 +12,13 @@ import logging
 import time
 from typing import Optional, Union
 
+from app.ai.lifecycle import (
+    InvalidStateTransitionError,
+    ModelLifecycle,
+    ModelLifecycleError,
+    ModelLifecycleState,
+    ModelRuntimeStatus,
+)
 from app.ai.model_manager import (
     ModelDefinition,
     ModelNotFoundError,
@@ -72,6 +79,7 @@ class LoadedModelInfo:
     executable: str
     loaded_at: float
     definition: ModelDefinition
+    lifecycle_state: ModelLifecycleState = ModelLifecycleState.READY
 
 
 class ModelLoader:
@@ -85,9 +93,11 @@ class ModelLoader:
         self,
         registry: Optional[ModelRegistry] = None,
         runtime: Optional[RuntimeAdapter] = None,
+        lifecycle: Optional[ModelLifecycle] = None,
     ) -> None:
         self.registry: ModelRegistry = registry if registry is not None else ModelRegistry()
         self.runtime: RuntimeAdapter = runtime if runtime is not None else LlamaCppRuntime()
+        self.lifecycle: ModelLifecycle = lifecycle if lifecycle is not None else ModelLifecycle()
         self._loaded_model_id: Optional[str] = None
         self._loaded_model_def: Optional[ModelDefinition] = None
         self._loaded_at: Optional[float] = None
@@ -104,6 +114,8 @@ class ModelLoader:
         If the underlying process has exited in the background, automatically synchronizes
         internal state and returns False.
         """
+        self.lifecycle.sync_with_runtime(self.runtime)
+
         if not self.runtime.is_running():
             self._cleanup_internal_state()
             return False
@@ -143,7 +155,12 @@ class ModelLoader:
             executable=executable,
             loaded_at=self._loaded_at,
             definition=self._loaded_model_def,
+            lifecycle_state=self.lifecycle.state,
         )
+
+    def get_lifecycle_status(self) -> ModelRuntimeStatus:
+        """Return high-level ModelRuntimeStatus from the lifecycle state machine."""
+        return self.lifecycle.get_status(self.runtime)
 
     def load(self, model_id: str) -> LoadedModelInfo:
         """Load a registered model through the RuntimeAdapter.
@@ -201,10 +218,14 @@ class ModelLoader:
                     model_id=model_id,
                 )
 
-        # 5. Delegate startup to RuntimeAdapter
+        # 5. Transition lifecycle: UNLOADED -> LOADING
+        self.lifecycle.begin_loading(model_id)
+
+        # 6. Delegate startup to RuntimeAdapter
         try:
             self.runtime.start(model)
         except RuntimeAdapterError as exc:
+            self.lifecycle.mark_failed(str(exc))
             self._cleanup_internal_state()
             if self.runtime.is_running():
                 try:
@@ -216,6 +237,7 @@ class ModelLoader:
                 model_id=model_id,
             ) from exc
         except Exception as exc:
+            self.lifecycle.mark_failed(str(exc))
             self._cleanup_internal_state()
             if self.runtime.is_running():
                 try:
@@ -227,26 +249,33 @@ class ModelLoader:
                 model_id=model_id,
             ) from exc
 
-        # 6. Record active model state
+        # 7. Transition lifecycle: LOADING -> READY
+        self.lifecycle.mark_ready()
+
+        # 8. Record active model state
         self._loaded_model_id = model_id
         self._loaded_model_def = model
         self._loaded_at = time.time()
 
         status = self.get_status()
         if status is None:
+            self.lifecycle.mark_failed("Runtime process died immediately after launch")
             self._cleanup_internal_state()
             raise ModelLoadError(
                 f"Runtime process for model '{model_id}' died immediately after launch.",
                 model_id=model_id,
             )
 
-        logger.info("ModelLoader successfully loaded model '%s'.", model_id)
+        logger.info("ModelLoader successfully loaded model '%s' (State: READY).", model_id)
         return status
 
     def unload(self, timeout: Optional[float] = None) -> None:
         """Unload the active model through RuntimeAdapter and reset tracking state."""
         try:
+            if self.lifecycle.state not in {ModelLifecycleState.UNLOADED, ModelLifecycleState.FAILED}:
+                self.lifecycle.begin_stopping()
             self.runtime.stop(timeout=timeout)
         finally:
+            self.lifecycle.mark_unloaded()
             self._cleanup_internal_state()
-            logger.info("ModelLoader unloaded active model.")
+            logger.info("ModelLoader unloaded active model (State: UNLOADED).")
