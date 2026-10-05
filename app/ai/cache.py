@@ -151,19 +151,27 @@ class ModelCache:
                 reverse=True,
             )
 
-    def get_least_recently_used(self) -> Optional[ModelCacheEntry]:
-        """Return the entry with the oldest last_used_at timestamp, or None if empty."""
+    def get_least_recently_used(self, exclude_active: bool = False) -> Optional[ModelCacheEntry]:
+        """Return the entry with the oldest last_used_at timestamp, or None if empty.
+
+        Args:
+            exclude_active: If True, only considers entries with cache_state != ACTIVE.
+        """
         with self._lock:
             if not self._entries:
                 return None
-            return min(self._entries.values(), key=lambda e: e.last_used_at)
+            entries = (
+                [e for e in self._entries.values() if not e.is_active]
+                if exclude_active
+                else list(self._entries.values())
+            )
+            if not entries:
+                return None
+            return min(entries, key=lambda e: e.last_used_at)
 
     def _get_lru_evictable(self) -> Optional[ModelCacheEntry]:
         """Identify LRU entry prioritizing non-active entries for eviction."""
-        evictable = [e for e in self._entries.values() if not e.is_active]
-        if not evictable:
-            return min(self._entries.values(), key=lambda e: e.last_used_at)
-        return min(evictable, key=lambda e: e.last_used_at)
+        return self.get_least_recently_used(exclude_active=True) or self.get_least_recently_used(exclude_active=False)
 
     def total_estimated_cached_memory(self) -> int:
         """Return the sum of estimated memory across all cached entries in bytes."""

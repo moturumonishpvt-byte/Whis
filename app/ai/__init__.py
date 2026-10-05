@@ -50,6 +50,13 @@ from app.ai.runtime import (
     RuntimeStartError,
     RuntimeState,
 )
+from app.ai.unload import (
+    ModelUnloadError,
+    UnloadAction,
+    UnloadDecision,
+    UnloadManager,
+    UnloadResult,
+)
 
 __all__ = [
     "CacheState",
@@ -81,6 +88,7 @@ __all__ = [
     "ModelRegistry",
     "ModelRegistryError",
     "ModelRuntimeStatus",
+    "ModelUnloadError",
     "ModelValidationError",
     "RAMManager",
     "RAMManagerError",
@@ -92,6 +100,10 @@ __all__ = [
     "RuntimeState",
     "SafetyEvaluation",
     "SystemMemoryProvider",
+    "UnloadAction",
+    "UnloadDecision",
+    "UnloadManager",
+    "UnloadResult",
 ]
 
 

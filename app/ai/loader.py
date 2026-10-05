@@ -341,13 +341,16 @@ class ModelLoader:
             if self.lifecycle.state not in {ModelLifecycleState.UNLOADED, ModelLifecycleState.FAILED}:
                 self.lifecycle.begin_stopping()
             self.runtime.stop(timeout=timeout)
+            self.lifecycle.mark_unloaded()
+        except Exception as exc:
+            self.lifecycle.mark_failed(f"Failed to stop runtime during unload: {exc}")
+            raise
         finally:
             if self.cache is not None and self._loaded_model_id is not None:
                 cached_entry = self.cache.get(self._loaded_model_id)
                 if cached_entry is not None:
                     cached_entry.cache_state = CacheState.CACHED_METADATA
-                    cached_entry.lifecycle_state = ModelLifecycleState.UNLOADED
+                    cached_entry.lifecycle_state = self.lifecycle.state
 
-            self.lifecycle.mark_unloaded()
             self._cleanup_internal_state()
-            logger.info("ModelLoader unloaded active model (State: UNLOADED).")
+            logger.info("ModelLoader unloaded active model (State: %s).", self.lifecycle.state.value)
