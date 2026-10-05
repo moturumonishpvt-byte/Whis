@@ -8,10 +8,12 @@ and tracking active model state without containing llama.cpp subprocess details.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 import time
 from typing import Optional, Union
 
+from app.ai.cache import CacheState, ModelCache, ModelCacheEntry
 from app.ai.lifecycle import (
     InvalidStateTransitionError,
     ModelLifecycle,
@@ -96,11 +98,13 @@ class ModelLoader:
         runtime: Optional[RuntimeAdapter] = None,
         lifecycle: Optional[ModelLifecycle] = None,
         ram_manager: Optional[RAMManager] = None,
+        cache: Optional[ModelCache] = None,
     ) -> None:
         self.registry: ModelRegistry = registry if registry is not None else ModelRegistry()
         self.runtime: RuntimeAdapter = runtime if runtime is not None else LlamaCppRuntime()
         self.lifecycle: ModelLifecycle = lifecycle if lifecycle is not None else ModelLifecycle()
         self.ram_manager: Optional[RAMManager] = ram_manager
+        self.cache: Optional[ModelCache] = cache
         self._loaded_model_id: Optional[str] = None
         self._loaded_model_def: Optional[ModelDefinition] = None
         self._loaded_at: Optional[float] = None
@@ -286,6 +290,39 @@ class ModelLoader:
         self._loaded_model_def = model
         self._loaded_at = time.time()
 
+        # 9. Update cache metadata if ModelCache configured
+        if self.cache is not None:
+            now = datetime.now(timezone.utc)
+            estimated_bytes = 0
+            if self.ram_manager is not None:
+                try:
+                    est = self.ram_manager.estimate_model_memory(model_id, context_tokens=context_tokens)
+                    estimated_bytes = est.estimated_total_bytes
+                except Exception:
+                    pass
+
+            cached = self.cache.get(model_id)
+            if cached is not None:
+                cached.cache_state = CacheState.ACTIVE
+                cached.lifecycle_state = ModelLifecycleState.READY
+                cached.last_loaded_at = now
+                cached.last_used_at = now
+                cached.usage_count += 1
+                if estimated_bytes > 0:
+                    cached.estimated_memory_bytes = estimated_bytes
+            else:
+                new_entry = ModelCacheEntry(
+                    model_id=model_id,
+                    last_used_at=now,
+                    last_loaded_at=now,
+                    usage_count=1,
+                    estimated_memory_bytes=estimated_bytes,
+                    lifecycle_state=ModelLifecycleState.READY,
+                    cache_state=CacheState.ACTIVE,
+                    metadata={"role": model.role, "type": model.type},
+                )
+                self.cache.put(new_entry)
+
         status = self.get_status()
         if status is None:
             self.lifecycle.mark_failed("Runtime process died immediately after launch")
@@ -305,6 +342,12 @@ class ModelLoader:
                 self.lifecycle.begin_stopping()
             self.runtime.stop(timeout=timeout)
         finally:
+            if self.cache is not None and self._loaded_model_id is not None:
+                cached_entry = self.cache.get(self._loaded_model_id)
+                if cached_entry is not None:
+                    cached_entry.cache_state = CacheState.CACHED_METADATA
+                    cached_entry.lifecycle_state = ModelLifecycleState.UNLOADED
+
             self.lifecycle.mark_unloaded()
             self._cleanup_internal_state()
             logger.info("ModelLoader unloaded active model (State: UNLOADED).")

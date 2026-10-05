@@ -1,5 +1,10 @@
-"""AI runtime and orchestration components."""
-
+from app.ai.cache import (
+    CacheState,
+    DEFAULT_MAX_CACHE_ENTRIES,
+    ModelCache,
+    ModelCacheEntry,
+    ModelCacheError,
+)
 from app.ai.lifecycle import (
     InvalidStateTransitionError,
     ModelLifecycle,
@@ -47,6 +52,8 @@ from app.ai.runtime import (
 )
 
 __all__ = [
+    "CacheState",
+    "DEFAULT_MAX_CACHE_ENTRIES",
     "DEFAULT_SAFETY_RESERVE_BYTES",
     "DevicePolicy",
     "InsufficientMemoryError",
@@ -57,6 +64,9 @@ __all__ = [
     "MemoryProvider",
     "MemorySnapshot",
     "ModelAlreadyLoadedError",
+    "ModelCache",
+    "ModelCacheEntry",
+    "ModelCacheError",
     "ModelConfigError",
     "ModelDefinition",
     "ModelDisabledError",
@@ -83,6 +93,7 @@ __all__ = [
     "SafetyEvaluation",
     "SystemMemoryProvider",
 ]
+
 
 
 
